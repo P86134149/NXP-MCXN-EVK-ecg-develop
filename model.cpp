@@ -22,10 +22,12 @@ limitations under the License.
 #include "tensorflow/lite/micro/micro_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
+#include <cmath>
 #include "fsl_debug_console.h"
 #include "model.h"
-#include "MIX_LMUEBCnet_1D_normalized_PCQ_outputf32.h"
+#include "MIX_LMUEBCnet_1D_normalized_converted.h"
 //#include "model_data.h"
+
 
 static const tflite::Model* s_model = nullptr;
 static tflite::MicroInterpreter* s_interpreter = nullptr;
@@ -81,7 +83,7 @@ status_t MODEL_RunInference(void)
     return kStatus_Success;
 }
 
-uint8_t* GetTensorData(TfLiteTensor* tensor, tensor_dims_t* dims, tensor_type_t* type)
+void* GetTensorData(TfLiteTensor* tensor, tensor_dims_t* dims, tensor_type_t* type)
 {
     switch (tensor->type)
     {
@@ -96,7 +98,8 @@ uint8_t* GetTensorData(TfLiteTensor* tensor, tensor_dims_t* dims, tensor_type_t*
             break;
         default:
             assert("Unknown input tensor data type!\r\n");
-    };
+            return nullptr;
+    }
 
     dims->size = tensor->dims->size;
     assert(dims->size <= MAX_TENSOR_DIMS);
@@ -105,40 +108,114 @@ uint8_t* GetTensorData(TfLiteTensor* tensor, tensor_dims_t* dims, tensor_type_t*
         dims->data[i] = tensor->dims->data[i];
     }
 
-    return tensor->data.uint8;
+    // 根據 tensor->type 回傳對應的數據指標
+    if (*type == kTensorType_FLOAT32) {
+        return tensor->data.f;
+    } else if (*type == kTensorType_UINT8) {
+        return tensor->data.uint8;
+    } else {
+        return tensor->data.int8;
+    }
 }
 
-uint8_t* MODEL_GetInputTensorData(tensor_dims_t* dims, tensor_type_t* type)
+
+//uint8_t* MODEL_GetInputTensorData(tensor_dims_t* dims, tensor_type_t* type)
+//{
+//    TfLiteTensor* inputTensor = s_interpreter->input(0);
+//
+//    return GetTensorData(inputTensor, dims, type);
+//}
+
+void* MODEL_GetInputTensorData(tensor_dims_t* dims, tensor_type_t* type)
 {
     TfLiteTensor* inputTensor = s_interpreter->input(0);
-
     return GetTensorData(inputTensor, dims, type);
 }
 
-uint8_t* MODEL_GetOutputTensorData(tensor_dims_t* dims, tensor_type_t* type)
+//uint8_t* MODEL_GetOutputTensorData(tensor_dims_t* dims, tensor_type_t* type)
+//{
+//    TfLiteTensor* outputTensor = s_interpreter->output(0);
+//
+//    return GetTensorData(outputTensor, dims, type);
+//}
+
+void* MODEL_GetOutputTensorData(tensor_dims_t* dims, tensor_type_t* type)
 {
     TfLiteTensor* outputTensor = s_interpreter->output(0);
-
     return GetTensorData(outputTensor, dims, type);
 }
 
 // Convert unsigned 8-bit image data to model input format in-place.
+void MODEL_ConvertInput(void* data, tensor_dims_t* dims, tensor_type_t type)
+{
+    int size = dims->data[1] * dims->data[2];
+
+    switch (type)
+    {
+        case kTensorType_UINT8:
+            break;
+        // PCQ quantize
+        case kTensorType_INT8:
+        {
+            float* f32Data = reinterpret_cast<float*>(data);
+            int8_t* int8Data = reinterpret_cast<int8_t*>(data);
+
+            // Example: Assume you have 1 channel and the scale is per-channel
+            // In practice, you should load `scale[channel]` from the model!
+            float per_channel_scales[1] = { 1.0f / 127.0f };  // Example: Get this from TFLite model
+//            const int32_t zero_point = 0;  // Symmetric quantization means zero_point is always 0
+
+            int channel = 0;  // Assuming 1D ECG, you may only have 1 channel
+
+            for (int i = 0; i < size; i++)
+            {
+                float value = f32Data[i];
+
+                // Apply per-channel quantization (use different scale per channel if needed)
+                int32_t quantized_value = static_cast<int32_t>(std::round(value / per_channel_scales[channel]));
+
+                // Clamp to int8 range [-128, 127]
+                quantized_value = (quantized_value > 127) ? 127 : ((quantized_value < -128) ? -128 : quantized_value);
+
+                int8Data[i] = static_cast<int8_t>(quantized_value);
+            }
+            break;
+        }
+//            int8_t* intData = (int8_t*)data;
+//            for (int i = size - 1; i >= 0; i--)
+//            {
+//                intData[i] = static_cast<int>(intData[i]) - 127;
+//            }
+//            break;
+        case kTensorType_FLOAT32:
+            // 這裡不再做正規化，假設 `main()` 已經標準化處理
+            break;
+        default:
+            assert("Unknown input tensor data type!\r\n");
+    }
+}
+
 //void MODEL_ConvertInput(uint8_t* data, tensor_dims_t* dims, tensor_type_t type)
 //{
-//    int size = dims->data[2] * dims->data[1] * dims->data[3];
+//    int size = 1;
+//    for (int i = 1; i < dims->size; i++)  // 避免影響 batch_size (dims->data[0])
+//    {
+//        size *= dims->data[i];
+//    }
+//
 //    switch (type)
 //    {
 //        case kTensorType_UINT8:
 //            break;
 //        case kTensorType_INT8:
-//            for (int i = size - 1; i >= 0; i--)
+//            for (int i = 0; i < size; i++)
 //            {
 //                reinterpret_cast<int8_t*>(data)[i] =
 //                    static_cast<int>(data[i]) - 127;
 //            }
 //            break;
 //        case kTensorType_FLOAT32:
-//            for (int i = size - 1; i >= 0; i--)
+//            for (int i = 0; i < size; i++)
 //            {
 //                reinterpret_cast<float*>(data)[i] =
 //                    (static_cast<int>(data[i]) - MODEL_INPUT_MEAN) / MODEL_INPUT_STD;
@@ -148,36 +225,6 @@ uint8_t* MODEL_GetOutputTensorData(tensor_dims_t* dims, tensor_type_t* type)
 //            assert("Unknown input tensor data type!\r\n");
 //    }
 //}
-void MODEL_ConvertInput(uint8_t* data, tensor_dims_t* dims, tensor_type_t type)
-{
-    int size = 1;
-    for (int i = 1; i < dims->size; i++)  // 避免影響 batch_size (dims->data[0])
-    {
-        size *= dims->data[i];
-    }
-
-    switch (type)
-    {
-        case kTensorType_UINT8:
-            break;
-        case kTensorType_INT8:
-            for (int i = 0; i < size; i++)
-            {
-                reinterpret_cast<int8_t*>(data)[i] =
-                    static_cast<int>(data[i]) - 127;
-            }
-            break;
-        case kTensorType_FLOAT32:
-            for (int i = 0; i < size; i++)
-            {
-                reinterpret_cast<float*>(data)[i] =
-                    (static_cast<int>(data[i]) - MODEL_INPUT_MEAN) / MODEL_INPUT_STD;
-            }
-            break;
-        default:
-            assert("Unknown input tensor data type!\r\n");
-    }
-}
 
 
 const char* MODEL_GetModelName(void)
